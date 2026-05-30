@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  buildTimerState,
+  postTimerMessage,
+  registerServiceWorker,
+  remainingSecondsFromState,
+  requestNotificationPermission,
+  subscribeTimerState,
+} from './timerSync.js';
 
 const TICK_MS = 250;
 
@@ -42,67 +50,65 @@ export default function App() {
   const [phase, setPhase] = useState('focus');
   const [remainingSeconds, setRemainingSeconds] = useState(25 * 60);
   const [running, setRunning] = useState(false);
+  const [notificationHint, setNotificationHint] = useState('');
 
   const endsAtRef = useRef(null);
   const phaseRef = useRef(phase);
-  const focusMinutesRef = useRef(focusMinutes);
-  const breakMinutesRef = useRef(breakMinutes);
+  const runningRef = useRef(running);
 
   useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
 
   useEffect(() => {
-    focusMinutesRef.current = focusMinutes;
-  }, [focusMinutes]);
+    runningRef.current = running;
+  }, [running]);
 
-  useEffect(() => {
-    breakMinutesRef.current = breakMinutes;
-  }, [breakMinutes]);
+  const applyState = useCallback((state) => {
+    if (!state) return;
 
-  const secondsForPhase = useCallback(
-    (targetPhase) =>
-      (targetPhase === 'focus' ? focusMinutesRef.current : breakMinutesRef.current) * 60,
-    [],
-  );
+    const phaseChanged = runningRef.current && state.running && phaseRef.current !== state.phase;
 
-  const onPhaseComplete = useCallback(() => {
-    playBeep();
-    vibrate();
+    setFocusMinutes(state.focusMinutes);
+    setBreakMinutes(state.breakMinutes);
+    setPhase(state.phase);
+    setRunning(Boolean(state.running));
+    endsAtRef.current = state.running ? state.endsAt : null;
+    setRemainingSeconds(remainingSecondsFromState(state));
 
-    const nextPhase = phaseRef.current === 'focus' ? 'break' : 'focus';
-    const nextSeconds = secondsForPhase(nextPhase);
-
-    phaseRef.current = nextPhase;
-    setPhase(nextPhase);
-    setRemainingSeconds(nextSeconds);
-    endsAtRef.current = Date.now() + nextSeconds * 1000;
-  }, [secondsForPhase]);
-
-  const tick = useCallback(() => {
-    if (!endsAtRef.current) return;
-
-    const left = Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000));
-    setRemainingSeconds(left);
-
-    if (left === 0) {
-      onPhaseComplete();
+    if (phaseChanged) {
+      playBeep();
+      vibrate();
     }
-  }, [onPhaseComplete]);
+  }, []);
 
   useEffect(() => {
-    if (!running) return undefined;
+    registerServiceWorker().then(() => postTimerMessage({ type: 'GET_STATE' }));
+    return subscribeTimerState(applyState);
+  }, [applyState]);
+
+  useEffect(() => {
+    if (!running || !endsAtRef.current) return undefined;
+
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000));
+      setRemainingSeconds(left);
+    };
 
     tick();
     const intervalId = window.setInterval(tick, TICK_MS);
-    const onVisibilityChange = () => tick();
+
+    const onVisibilityChange = () => {
+      postTimerMessage({ type: 'GET_STATE' });
+      tick();
+    };
 
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [running, tick]);
+  }, [running]);
 
   const handleFocusMinutesChange = (event) => {
     const minutes = Math.max(1, Number.parseInt(event.target.value, 10) || 1);
@@ -120,24 +126,59 @@ export default function App() {
     }
   };
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (running) return;
-    endsAtRef.current = Date.now() + remainingSeconds * 1000;
+
+    const permission = await requestNotificationPermission();
+    if (permission !== 'granted') {
+      setNotificationHint('알림 권한이 필요합니다. 브라우저 설정에서 알림을 허용해 주세요.');
+      return;
+    }
+
+    setNotificationHint('');
+
+    const state = buildTimerState({
+      focusMinutes,
+      breakMinutes,
+      phase,
+      remainingSeconds,
+      running: true,
+    });
+
+    endsAtRef.current = state.endsAt;
     setRunning(true);
+    await postTimerMessage({ type: 'START', state });
   };
 
-  const handleStop = () => {
-    if (running && endsAtRef.current) {
-      const left = Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000));
-      setRemainingSeconds(left);
-    }
-    setRunning(false);
+  const handleStop = async () => {
+    const left =
+      running && endsAtRef.current
+        ? Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000))
+        : remainingSeconds;
+
+    const state = buildTimerState({
+      focusMinutes,
+      breakMinutes,
+      phase,
+      remainingSeconds: left,
+      running: false,
+    });
+
     endsAtRef.current = null;
+    setRemainingSeconds(left);
+    setRunning(false);
+    await postTimerMessage({ type: 'STOP', state });
   };
 
   return (
     <main>
       <h1>뽀모도로</h1>
+
+      <p>
+        안드로이드: Chrome에서 홈 화면에 추가하고 알림을 허용하면, 화면이 꺼져 있어도
+        타이머가 진행되고 알림이 옵니다.
+      </p>
+      {notificationHint ? <p>{notificationHint}</p> : null}
 
       <p>
         <label>
