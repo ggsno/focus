@@ -72,30 +72,9 @@ async function schedulePhaseEnd(state) {
   const delay = state.endsAt - Date.now();
   if (delay <= 0) return;
 
-  const { title, body } = phaseMessage(state.phase);
-  const options = {
-    body,
-    tag: NOTIFICATION_TAG,
-    renotify: true,
-    vibrate: [200, 100, 200],
-    silent: false,
-    data: { endsAt: state.endsAt, phase: state.phase },
-  };
-
-  let usesScheduledNotification = false;
-
-  try {
-    await self.registration.showNotification(title, {
-      ...options,
-      showTrigger: { timestamp: state.endsAt },
-    });
-    usesScheduledNotification = true;
-  } catch {
-    // 예약 알림 미지원
-  }
-
+  // showTrigger는 미지원 환경에서 알림이 즉시 뜨는 버그가 있어 사용하지 않음
   timeoutId = setTimeout(() => {
-    handlePhaseEnd(state, usesScheduledNotification);
+    handlePhaseEnd();
   }, Math.min(delay, 2147483647));
 }
 
@@ -115,14 +94,12 @@ async function catchUpState(state) {
   return current;
 }
 
-async function handlePhaseEnd(state, skipNotification = false) {
+async function handlePhaseEnd() {
   const current = await loadState();
   if (!current?.running || !current.endsAt) return;
   if (Date.now() < current.endsAt - 500) return;
 
-  if (!skipNotification) {
-    await showPhaseNotification(current.phase);
-  }
+  await showPhaseNotification(current.phase);
 
   const updated = nextPhaseState(current);
   await saveState(updated);
